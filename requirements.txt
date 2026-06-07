@@ -7,3 +7,5 @@ sounddevice
 numpy
 soundfile
 pytest
+
+pytest-asyncio
