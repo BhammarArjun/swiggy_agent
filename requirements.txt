@@ -1,7 +1,7 @@
 litert-lm-api
 parakeet-mlx
 kokoro>=0.9
-deepfilternet
+noisereduce
 pipecat-ai[silero,local]
 sounddevice
 numpy
