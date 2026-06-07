@@ -14,7 +14,8 @@ InterruptionFrames can preempt mid-chunk. Deferred until observed.
 import numpy as np
 from pipecat.frames.frames import (
     Frame, AudioRawFrame, InputAudioRawFrame, TranscriptionFrame,
-    TextFrame, TTSAudioRawFrame, InterruptionFrame, UserStoppedSpeakingFrame,
+    TextFrame, TTSAudioRawFrame, InterruptionFrame,
+    VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
@@ -42,15 +43,26 @@ class DenoiserProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, InputAudioRawFrame):
             clean = self._dn.process(_bytes_to_f32(frame.audio))
+            # Emit a denoised InputAudioRawFrame (not a plain AudioRawFrame) so the
+            # downstream VADProcessor — which only analyzes InputAudioRawFrame —
+            # still sees it. This is why the denoiser sits BEFORE the VAD.
             await self.push_frame(
-                AudioRawFrame(_f32_to_bytes(clean), frame.sample_rate, frame.num_channels),
+                InputAudioRawFrame(_f32_to_bytes(clean), frame.sample_rate,
+                                   frame.num_channels),
                 direction)
         else:
             await self.push_frame(frame, direction)
 
 
 class STTProcessor(FrameProcessor):
-    """Buffers audio frames; on VAD-driven UserStoppedSpeaking, transcribes."""
+    """Captures mic audio between VAD speech start/stop, then transcribes.
+
+    pipecat 1.3.0's VADProcessor emits VADUserStartedSpeakingFrame /
+    VADUserStoppedSpeakingFrame (the bare User*SpeakingFrame variants are
+    produced by the turn-controller subsystem, which this custom pipeline does
+    not use). We capture only while the VAD reports speech, so silence/noise
+    between utterances is not transcribed.
+    """
 
     # Hard cap so a stuck-open mic / missed VAD-stop can't grow the buffer
     # without bound. 30s of 16k mono float32 ~= 1.9 MB.
@@ -61,6 +73,7 @@ class STTProcessor(FrameProcessor):
         self._stt = ParakeetSTT()
         self._buf: list[np.ndarray] = []
         self._buffered_samples = 0
+        self._capturing = False
 
     def _clear_buffer(self) -> None:
         self._buf = []
@@ -68,12 +81,17 @@ class STTProcessor(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        if isinstance(frame, InterruptionFrame):
-            # Barge-in: drop any half-captured utterance so it doesn't get
-            # prepended to the next transcription.
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            # New utterance begins (also a barge-in): start fresh capture.
             self._clear_buffer()
+            self._capturing = True
             await self.push_frame(frame, direction)
-        elif isinstance(frame, AudioRawFrame) and not isinstance(frame, TTSAudioRawFrame):
+        elif isinstance(frame, InterruptionFrame):
+            self._clear_buffer()
+            self._capturing = False
+            await self.push_frame(frame, direction)
+        elif (self._capturing and isinstance(frame, AudioRawFrame)
+              and not isinstance(frame, TTSAudioRawFrame)):
             chunk = _bytes_to_f32(frame.audio)
             self._buf.append(chunk)
             self._buffered_samples += chunk.shape[0]
@@ -83,13 +101,15 @@ class STTProcessor(FrameProcessor):
                 self._buf.append(chunk)
                 self._buffered_samples = chunk.shape[0]
             await self.push_frame(frame, direction)
-        elif isinstance(frame, UserStoppedSpeakingFrame) and self._buf:
-            audio = np.concatenate(self._buf)
-            self._clear_buffer()
-            text = self._stt.transcribe(audio)
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._capturing = False
             await self.push_frame(frame, direction)
-            if text:
-                await self.push_frame(TranscriptionFrame(text, "user", ""), direction)
+            if self._buf:
+                audio = np.concatenate(self._buf)
+                self._clear_buffer()
+                text = self._stt.transcribe(audio)
+                if text:
+                    await self.push_frame(TranscriptionFrame(text, "user", ""), direction)
         else:
             await self.push_frame(frame, direction)
 
@@ -102,7 +122,8 @@ class GemmaLLMProcessor(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        if isinstance(frame, InterruptionFrame):
+        if isinstance(frame, (InterruptionFrame, VADUserStartedSpeakingFrame)):
+            # Barge-in: user started speaking (or explicit interruption).
             self._interrupted = True
             self._agent.interrupt()
             await self.push_frame(frame, direction)
@@ -124,7 +145,8 @@ class KokoroTTSProcessor(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        if isinstance(frame, InterruptionFrame):
+        if isinstance(frame, (InterruptionFrame, VADUserStartedSpeakingFrame)):
+            # Barge-in: stop speaking as soon as the user starts.
             self._interrupted = True
             await self.push_frame(frame, direction)
         elif isinstance(frame, TextFrame):

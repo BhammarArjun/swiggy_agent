@@ -26,8 +26,8 @@ def build_task() -> PipelineTask:
         params=VADParams(stop_secs=CONFIG.vad_stop_secs)))
     pipeline = Pipeline([
         transport.input(),
+        DenoiserProcessor(),   # denoise BEFORE VAD so background noise can't trip it
         vad,
-        DenoiserProcessor(),
         STTProcessor(),
         GemmaLLMProcessor(swiggy_stub.TOOLS, SWIGGY_SYSTEM_PROMPT),
         KokoroTTSProcessor(),
