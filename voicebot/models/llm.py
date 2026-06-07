@@ -7,6 +7,8 @@ from typing import Callable, Iterator
 os.environ.setdefault("GLOG_minloglevel", "3")
 import litert_lm
 
+from voicebot.config import CONFIG
+
 
 def _normalize_tool(fn: Callable) -> Callable:
     """Ensure ``inspect.signature(fn)`` reflects the tool's real parameters.
@@ -47,12 +49,16 @@ class GemmaAgent:
         self._engine = litert_lm.Engine(
             model_path,
             backend=litert_lm.Backend.CPU(),
-            cache_dir="/tmp/litert-lm-cache",
+            cache_dir=CONFIG.llm_cache_dir,
         )
         self._tools = [_normalize_tool(t) for t in tools]
         self._system_prompt = system_prompt
         self._interrupt = False
-        self._open()
+        try:
+            self._open()
+        except Exception:
+            self._engine.close()  # don't leak the engine if conversation setup fails
+            raise
 
     def _open(self) -> None:
         msgs = [litert_lm.Message.system(self._system_prompt)]
