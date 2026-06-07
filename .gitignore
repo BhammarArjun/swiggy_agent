@@ -1,0 +1,18 @@
+# secrets
+.env
+*.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# models / large artifacts (kept in HF cache or ~/models, not in repo)
+*.litertlm
+*.gguf
+*.onnx
+
+# misc
+default.profraw
+.DS_Store
