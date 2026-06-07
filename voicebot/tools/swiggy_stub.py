@@ -89,6 +89,10 @@ def update_food_cart(restaurantId: str, itemId: str, quantity: int) -> dict:
         return {"ok": False, "error": "unknown item"}
     if _cart["restaurantId"] and _cart["restaurantId"] != restaurantId:
         _cart["items"] = []  # Food cart flushes on restaurant switch
+    prospective = sum(i["price"] * i["quantity"] for i in _cart["items"])
+    prospective += item["price"] * int(quantity)
+    if prospective > CART_CAP:
+        return {"ok": False, "error": f"cart total {prospective} exceeds cap {CART_CAP}"}
     _cart["restaurantId"] = restaurantId
     _cart["items"].append({"itemId": itemId, "name": item["name"],
                             "price": item["price"], "quantity": int(quantity)})

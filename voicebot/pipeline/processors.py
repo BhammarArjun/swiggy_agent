@@ -120,6 +120,11 @@ class GemmaLLMProcessor(FrameProcessor):
         self._agent = GemmaAgent(CONFIG.llm_model_path, tools, system_prompt)
         self._interrupted = False
 
+    async def cleanup(self):
+        # Release the LiteRT-LM conversation + engine on pipeline shutdown.
+        await super().cleanup()
+        self._agent.close()
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, (InterruptionFrame, VADUserStartedSpeakingFrame)):

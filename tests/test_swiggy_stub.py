@@ -41,3 +41,12 @@ def test_place_order_requires_cod_and_returns_orderid():
 def test_place_order_rejects_non_cod():
     res = s.place_food_order("CARD")
     assert res.get("success") is False
+
+
+def test_cart_cap_is_enforced():
+    rid = "rest_paradise_9"
+    # Chicken Biryani is 320; 3x = 960 ok, +1 -> 1280 > CART_CAP (1000)
+    assert s.update_food_cart(rid, "item_chk_bir", 3)["ok"] is True
+    rejected = s.update_food_cart(rid, "item_chk_bir", 1)
+    assert rejected["ok"] is False
+    assert s.get_food_cart()["total"] == 960

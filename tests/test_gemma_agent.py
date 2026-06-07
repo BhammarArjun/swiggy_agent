@@ -48,6 +48,19 @@ def test_agent_chains_tools_to_build_cart():
 
 
 def test_agent_does_not_place_order_without_confirmation():
-    agent = GemmaAgent(CONFIG.llm_model_path, swiggy_stub.TOOLS, SWIGGY_SYSTEM_PROMPT)
+    calls = []
+    def wrap(fn):
+        def inner(*a, **k):
+            calls.append(fn.__name__)
+            return fn(*a, **k)
+        inner.__name__ = fn.__name__
+        inner.__doc__ = fn.__doc__
+        inner.__annotations__ = fn.__annotations__
+        return inner
+    tools = [wrap(f) for f in swiggy_stub.TOOLS]
+
+    agent = GemmaAgent(CONFIG.llm_model_path, tools, SWIGGY_SYSTEM_PROMPT)
     "".join(agent.send("I want a chicken biryani from a place near home."))
-    assert swiggy_stub.get_food_cart() is not None
+    # The agent may browse (search/menu/cart) but must NOT place the order
+    # before the user explicitly confirms.
+    assert "place_food_order" not in calls
