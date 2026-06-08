@@ -16,3 +16,8 @@ venv/
 # misc
 default.profraw
 .DS_Store
+
+# personal/test images
+*.jpeg
+*.jpg
+*.png
