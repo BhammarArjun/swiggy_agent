@@ -16,6 +16,7 @@ import re
 from typing import Callable, Iterator
 
 import numpy as np
+from loguru import logger
 from pipecat.frames.frames import (
     Frame, AudioRawFrame, InputAudioRawFrame, TranscriptionFrame,
     TextFrame, TTSAudioRawFrame, InterruptionFrame,
@@ -122,6 +123,7 @@ class STTProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, VADUserStartedSpeakingFrame):
             # New utterance begins (also a barge-in): start fresh capture.
+            logger.info("🎙️  User started speaking")
             self._clear_buffer()
             self._capturing = True
             await self.push_frame(frame, direction)
@@ -141,6 +143,7 @@ class STTProcessor(FrameProcessor):
                 self._buffered_samples = chunk.shape[0]
             await self.push_frame(frame, direction)
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            logger.info("🤫 User stopped speaking — transcribing")
             self._capturing = False
             await self.push_frame(frame, direction)
             if self._buf:
@@ -149,7 +152,10 @@ class STTProcessor(FrameProcessor):
                 # transcription is blocking CPU work — keep it off the event loop
                 text = await asyncio.to_thread(self._stt.transcribe, audio)
                 if text:
+                    logger.info("📝 Transcription: {!r}", text)
                     await self.push_frame(TranscriptionFrame(text, "user", ""), direction)
+                else:
+                    logger.info("📝 Transcription: (empty)")
         else:
             await self.push_frame(frame, direction)
 
@@ -174,10 +180,13 @@ class GemmaLLMProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, (InterruptionFrame, VADUserStartedSpeakingFrame)):
             # Barge-in: user started speaking (or explicit interruption).
+            if not self._interrupted:
+                logger.info("✋ Barge-in — interrupting LLM")
             self._interrupted = True
             self._agent.interrupt()
             await self.push_frame(frame, direction)
         elif isinstance(frame, TranscriptionFrame):
+            logger.info("🧠 LLM thinking (input: {!r})", frame.text)
             self._interrupted = False
             # The model streams sub-word tokens; we buffer them and only emit a
             # TextFrame once a full sentence is ready, so TTS speaks phrases
@@ -198,10 +207,12 @@ class GemmaLLMProcessor(FrameProcessor):
                     sentence, buf = buf[:m.end()], buf[m.end():]
                     sentence = sentence.strip()
                     if sentence:
+                        logger.info("💬 LLM: {}", sentence)
                         await self.push_frame(TextFrame(sentence), direction)
             # flush any trailing text that didn't end with punctuation
             tail = buf.strip()
             if tail and not self._interrupted:
+                logger.info("💬 LLM: {}", tail)
                 await self.push_frame(TextFrame(tail), direction)
         else:
             await self.push_frame(frame, direction)
@@ -220,6 +231,7 @@ class KokoroTTSProcessor(FrameProcessor):
             self._interrupted = True
             await self.push_frame(frame, direction)
         elif isinstance(frame, TextFrame):
+            logger.info("🔊 TTS speaking: {}", frame.text)
             self._interrupted = False
             async for chunk in _stream_in_thread(
                 lambda: self._tts.synthesize(frame.text),
