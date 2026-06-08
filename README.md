@@ -65,8 +65,6 @@ voicebot/
   tools/swiggy_stub.py # stub MCP tools + in-memory cart
 scripts/run_bot.py     # entry point — `python scripts/run_bot.py`
 tests/                 # unit + integration tests (model-gated where needed)
-phase-1/               # model-evaluation notes that justified the model choices
-docs/superpowers/      # design spec + implementation plan
 ```
 
 ## Running it
@@ -89,9 +87,9 @@ barge-in events.
 
 ## Design choices & constraints
 
-- **Why Gemma 4 E2B as the only brain:** Phase-1 evaluation (see `phase-1/`)
-  showed it reliably chains multi-step tool calls with real IDs, whereas a
-  smaller routing model (FunctionGemma-270M) could not.
+- **Why Gemma 4 E2B as the only brain:** evaluation showed it reliably chains
+  multi-step tool calls with real IDs, whereas a smaller routing model
+  (FunctionGemma-270M) could not.
 - **Single user, no concurrency** — a personal on-device assistant.
 - **Safety:** confirms before placing an order; COD only; cart capped; v1 never
   places a real order (stub tools).
