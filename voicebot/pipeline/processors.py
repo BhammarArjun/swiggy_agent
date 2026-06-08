@@ -127,6 +127,13 @@ class STTProcessor(FrameProcessor):
             self._clear_buffer()
             self._capturing = True
             await self.push_frame(frame, direction)
+            # Barge-in: emit an InterruptionFrame so the OUTPUT TRANSPORT flushes
+            # its already-buffered TTS audio (base_output only clears its audio
+            # buffer on InterruptionFrame, not on VADUserStartedSpeakingFrame).
+            # Without this, the bot keeps talking from buffered audio even though
+            # the LLM/TTS stages have stopped generating. It's a SystemFrame, so
+            # it's processed out-of-band and reaches the transport immediately.
+            await self.push_frame(InterruptionFrame(), direction)
         elif isinstance(frame, InterruptionFrame):
             self._clear_buffer()
             self._capturing = False
@@ -166,6 +173,27 @@ class STTProcessor(FrameProcessor):
 # Sentence-final punctuation; we flush accumulated tokens to TTS at these
 # boundaries so Kokoro synthesizes whole phrases (not one word/token at a time).
 _SENTENCE_END = re.compile(r"[.!?…]+[\"')\]]?\s|[\n]+")
+# Clause punctuation; used by the hybrid buffer to start speaking sooner on long
+# sentences — once enough text has accumulated, a comma/semicolon/colon is a
+# natural-sounding place to cut, so we don't wait for the full sentence.
+_CLAUSE_END = re.compile(r"[,;:]\s")
+# Don't speak a clause fragment shorter than this (avoids choppy tiny phrases).
+_MIN_CLAUSE_CHARS = 45
+
+
+def _next_flush(buf: str) -> int | None:
+    """Index to cut ``buf`` at for the next TTS chunk, or None to keep buffering.
+
+    Prefers a full sentence; falls back to a clause boundary only once we've
+    accumulated enough text to sound natural.
+    """
+    m = _SENTENCE_END.search(buf)
+    if m:
+        return m.end()
+    cm = _CLAUSE_END.search(buf)
+    if cm and cm.end() >= _MIN_CLAUSE_CHARS:
+        return cm.end()
+    return None
 
 
 class GemmaLLMProcessor(FrameProcessor):
@@ -202,12 +230,12 @@ class GemmaLLMProcessor(FrameProcessor):
                 if self._interrupted:
                     break
                 buf += token
-                # flush every complete sentence found in the buffer
+                # flush each ready chunk (sentence, or long-enough clause)
                 while True:
-                    m = _SENTENCE_END.search(buf)
-                    if not m:
+                    cut = _next_flush(buf)
+                    if cut is None:
                         break
-                    sentence, buf = buf[:m.end()], buf[m.end():]
+                    sentence, buf = buf[:cut], buf[cut:]
                     sentence = sentence.strip()
                     if sentence:
                         logger.info("💬 LLM: {}", sentence)
