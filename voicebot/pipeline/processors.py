@@ -11,7 +11,9 @@ barge-in latency is one chunk's synth time. If live testing shows laggy
 barge-in, offload these sync loops to a thread (asyncio.to_thread) so
 InterruptionFrames can preempt mid-chunk. Deferred until observed.
 """
+import asyncio
 import re
+from typing import Callable, Iterator
 
 import numpy as np
 from pipecat.frames.frames import (
@@ -28,11 +30,46 @@ from voicebot.models.tts import KokoroTTS
 from voicebot.config import CONFIG
 
 
+async def _stream_in_thread(
+    gen_factory: Callable[[], Iterator],
+    should_stop: Callable[[], bool],
+):
+    """Run a blocking generator on a worker thread and yield its items on the
+    event loop, so synchronous model inference (LLM/TTS) doesn't block the loop
+    (audio I/O + barge-in stay responsive). Stops early when should_stop() flips.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+    sentinel = object()
+
+    def worker():
+        try:
+            for item in gen_factory():
+                if should_stop():
+                    break
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+
+    fut = loop.run_in_executor(None, worker)
+    try:
+        while True:
+            item = await queue.get()
+            if item is sentinel:
+                break
+            yield item
+    finally:
+        await fut
+
+
 def _bytes_to_f32(data: bytes) -> np.ndarray:
     return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def _f32_to_bytes(audio: np.ndarray) -> bytes:
+    # nan_to_num guards against NaN/inf (e.g. from upstream DSP) which would
+    # otherwise cast to garbage int16 and emit RuntimeWarnings.
+    audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
     return (np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes()
 
 
@@ -109,7 +146,8 @@ class STTProcessor(FrameProcessor):
             if self._buf:
                 audio = np.concatenate(self._buf)
                 self._clear_buffer()
-                text = self._stt.transcribe(audio)
+                # transcription is blocking CPU work — keep it off the event loop
+                text = await asyncio.to_thread(self._stt.transcribe, audio)
                 if text:
                     await self.push_frame(TranscriptionFrame(text, "user", ""), direction)
         else:
@@ -145,7 +183,10 @@ class GemmaLLMProcessor(FrameProcessor):
             # TextFrame once a full sentence is ready, so TTS speaks phrases
             # instead of spelling out tokens.
             buf = ""
-            for token in self._agent.send(frame.text):
+            async for token in _stream_in_thread(
+                lambda: self._agent.send(frame.text),
+                lambda: self._interrupted,
+            ):
                 if self._interrupted:
                     break
                 buf += token
@@ -180,7 +221,10 @@ class KokoroTTSProcessor(FrameProcessor):
             await self.push_frame(frame, direction)
         elif isinstance(frame, TextFrame):
             self._interrupted = False
-            for chunk in self._tts.synthesize(frame.text):
+            async for chunk in _stream_in_thread(
+                lambda: self._tts.synthesize(frame.text),
+                lambda: self._interrupted,
+            ):
                 if self._interrupted:
                     break
                 await self.push_frame(

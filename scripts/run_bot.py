@@ -26,7 +26,13 @@ sys.stderr = os.fdopen(_real_stderr_fd, "w", buffering=1)
 
 import asyncio
 import logging
+import warnings
 from pathlib import Path
+
+# Third-party DSP/ML libs (noisereduce, torch, kokoro) emit noisy Runtime/Future
+# warnings on every audio frame. Silence them so the console shows only the
+# Pipecat lifecycle + our tool-call traces.
+warnings.filterwarnings("ignore")
 
 # ensure the repo root (which contains the `voicebot` package) is importable,
 # regardless of the current working directory
