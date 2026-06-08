@@ -149,8 +149,11 @@ class STTProcessor(FrameProcessor):
             if self._buf:
                 audio = np.concatenate(self._buf)
                 self._clear_buffer()
-                # transcription is blocking CPU work — keep it off the event loop
-                text = await asyncio.to_thread(self._stt.transcribe, audio)
+                # NOTE: Parakeet runs on MLX (Apple Metal). MLX GPU streams are
+                # thread-local, so it MUST run on this (event-loop) thread — a
+                # worker thread raises "There is no Stream(gpu, 0)". Hence no
+                # asyncio.to_thread here (unlike the CPU LLM/TTS stages).
+                text = self._stt.transcribe(audio)
                 if text:
                     logger.info("📝 Transcription: {!r}", text)
                     await self.push_frame(TranscriptionFrame(text, "user", ""), direction)
