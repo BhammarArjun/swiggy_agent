@@ -3,14 +3,39 @@
 Runnable from anywhere, e.g.:
     python scripts/run_bot.py
     python run_bot.py   (from inside scripts/)
+
+Console hygiene: LiteRT-LM links absl/glog C++ logging that writes straight to
+file descriptor 2 (stderr) and ignores every GLOG_*/TF_* env knob in this
+build. To get a clean console showing only Pipecat output, we point the OS-level
+stderr fd at /dev/null (silencing the C++ libs) and rebind Python's sys.stderr
+to the real terminal — so loguru (Pipecat) logs and Python tracebacks still show.
 """
-import asyncio
+import os
 import sys
+
+# --- redirect C-level stderr BEFORE importing anything that links LiteRT ---
+_real_stderr_fd = os.dup(2)                      # keep a handle to the terminal
+_devnull_fd = os.open(os.devnull, os.O_WRONLY)
+os.dup2(_devnull_fd, 2)                           # C/C++ stderr -> /dev/null
+os.close(_devnull_fd)
+# Rebind Python's stderr to the real terminal so loguru/pipecat + tracebacks
+# (which write via sys.stderr, not raw fd 2) remain visible. loguru binds its
+# default sink to sys.stderr at import time, so this must happen before the
+# voicebot/pipecat imports below.
+sys.stderr = os.fdopen(_real_stderr_fd, "w", buffering=1)
+
+import asyncio
+import logging
 from pathlib import Path
 
 # ensure the repo root (which contains the `voicebot` package) is importable,
 # regardless of the current working directory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Keep stdlib logging quiet except our own stub-tool tracing, which is useful
+# for watching the Swiggy tool chain fire.
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("swiggy_stub").setLevel(logging.INFO)
 
 from voicebot.pipeline.app import run
 

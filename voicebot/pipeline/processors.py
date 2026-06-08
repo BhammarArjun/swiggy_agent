@@ -11,6 +11,8 @@ barge-in latency is one chunk's synth time. If live testing shows laggy
 barge-in, offload these sync loops to a thread (asyncio.to_thread) so
 InterruptionFrames can preempt mid-chunk. Deferred until observed.
 """
+import re
+
 import numpy as np
 from pipecat.frames.frames import (
     Frame, AudioRawFrame, InputAudioRawFrame, TranscriptionFrame,
@@ -114,6 +116,11 @@ class STTProcessor(FrameProcessor):
             await self.push_frame(frame, direction)
 
 
+# Sentence-final punctuation; we flush accumulated tokens to TTS at these
+# boundaries so Kokoro synthesizes whole phrases (not one word/token at a time).
+_SENTENCE_END = re.compile(r"[.!?…]+[\"')\]]?\s|[\n]+")
+
+
 class GemmaLLMProcessor(FrameProcessor):
     def __init__(self, tools, system_prompt):
         super().__init__()
@@ -134,10 +141,27 @@ class GemmaLLMProcessor(FrameProcessor):
             await self.push_frame(frame, direction)
         elif isinstance(frame, TranscriptionFrame):
             self._interrupted = False
+            # The model streams sub-word tokens; we buffer them and only emit a
+            # TextFrame once a full sentence is ready, so TTS speaks phrases
+            # instead of spelling out tokens.
+            buf = ""
             for token in self._agent.send(frame.text):
                 if self._interrupted:
                     break
-                await self.push_frame(TextFrame(token), direction)
+                buf += token
+                # flush every complete sentence found in the buffer
+                while True:
+                    m = _SENTENCE_END.search(buf)
+                    if not m:
+                        break
+                    sentence, buf = buf[:m.end()], buf[m.end():]
+                    sentence = sentence.strip()
+                    if sentence:
+                        await self.push_frame(TextFrame(sentence), direction)
+            # flush any trailing text that didn't end with punctuation
+            tail = buf.strip()
+            if tail and not self._interrupted:
+                await self.push_frame(TextFrame(tail), direction)
         else:
             await self.push_frame(frame, direction)
 
